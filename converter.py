@@ -40,7 +40,73 @@ def check_and_install_dependencies():
             print("安裝已取消。腳本無法繼續執行。")
             sys.exit()
 
+def check_ffmpeg():
+    """檢查 FFmpeg 是否已安裝並在系統路徑中。"""
+    try:
+        subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\n--- 警告：未找到 FFmpeg ---")
+        print("此程式的音訊和影片處理功能需要 FFmpeg。")
+        
+        autoinstall_ffmpeg = False
+        install_command = ""
+        os_name = ""
+
+        if sys.platform.startswith('linux'):
+            os_name = "Linux (Debian/Ubuntu)"
+            install_command = "sudo apt-get update && sudo apt-get install -y ffmpeg"
+        elif sys.platform == 'darwin':
+            os_name = "macOS"
+            try:
+                subprocess.run(["brew", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                install_command = "brew install ffmpeg"
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print("macOS 使用者：自動安裝需要 Homebrew，但似乎未安裝。")
+                print("請先從 https://brew.sh/ 安裝 Homebrew。")
+        elif sys.platform == 'win32':
+            os_name = "Windows"
+            try:
+                # 優先檢查 winget
+                subprocess.run(["winget", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                install_command = "winget install --id=Gyan.FFmpeg -e"
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                try:
+                    # 若 winget 失敗，再檢查 choco
+                    subprocess.run(["choco", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    install_command = "choco install ffmpeg"
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    print("Windows 使用者：推薦使用 winget 或 Chocolatey 進行自動安裝，但兩者似乎都未安裝。")
+                    print("請考慮安裝 winget (內建於新版 Windows) 或 Chocolatey (https://chocolatey.org/install)。")
+
+        if install_command:
+            choice = input(f"偵測到您的作業系統是 {os_name}。是否嘗試自動安裝 FFmpeg？ (Y/n): ").lower()
+            if choice in ['y', 'yes', '']:
+                autoinstall_ffmpeg = True
+
+        if autoinstall_ffmpeg:
+            print(f"正在執行安裝指令：'{install_command}'")
+            print("這可能需要管理員權限，並請留意任何彈出的確認視窗。")
+            try:
+                process = subprocess.run(install_command, shell=True, check=True)
+                print("\nFFmpeg 安裝成功！")
+                restart_script()
+            except subprocess.CalledProcessError as e:
+                print(f"\nFFmpeg 自動安裝失敗: {e}")
+                print("請嘗試手動安裝。")
+        
+        print("\n請先手動安裝 FFmpeg，然後再重新執行此腳本。")
+        print("安裝說明：")
+        print("  - Windows：")
+        print("    1. 使用 winget (推薦)：在終端機中執行 'winget install --id=Gyan.FFmpeg -e'")
+        print("    2. 使用 Chocolatey：請先安裝 Chocolatey (https://chocolatey.org/install)，然後執行 'choco install ffmpeg'")
+        print("    3. 手動下載：從 https://ffmpeg.org/download.html 下載，並將其路徑新增到系統環境變數中。")
+        print("  - macOS (使用 Homebrew)：在終端機中執行 'brew install ffmpeg'")
+        print("  - Linux (Debian/Ubuntu)：在終端機中執行 'sudo apt-get install ffmpeg'")
+        print("---------------------------------")
+        sys.exit(1)
+
 check_and_install_dependencies()
+check_ffmpeg()
 
 from PIL import Image
 import pillow_heif
@@ -114,6 +180,16 @@ def get_target_video_format():
         if choice in ["mp4", "webm", "mov", "avi", "gif"]:
             return choice
         print("無效的輸入，請輸入 'mp4', 'webm', 'mov', 'avi' 或 'gif'。")
+
+def ask_extract_audio():
+    """詢問使用者是否只想從影片中提取音訊。"""
+    while True:
+        choice = input("您是否只想保留音訊？ (y/n): ").lower()
+        if choice in ['y', 'yes']:
+            return True
+        elif choice in ['n', 'no', '']:
+            return False
+        print("無效的輸入，請輸入 'y' 或 'n'。")
 
 def get_target_audio_format():
     """向使用者詢問目標音訊轉換格式。"""
@@ -284,6 +360,30 @@ def convert_audio(input_path, output_folder, target_format):
         print(f"轉換 '{filename}' 時發生錯誤: {e}")
         return "error"
 
+def extract_audio_from_video(input_path, output_folder, target_format):
+    """從影片中提取音訊並轉換為指定格式。"""
+    filename = os.path.basename(input_path)
+    clean_name = os.path.splitext(filename)[0]
+    output_filename = f"{clean_name}.{target_format}"
+    output_path = os.path.join(output_folder, output_filename)
+    counter = 1
+    while os.path.exists(output_path):
+        output_filename = f"{clean_name} ({counter}).{target_format}"
+        output_path = os.path.join(output_folder, output_filename)
+        counter += 1
+
+    try:
+        video = mp.VideoFileClip(input_path)
+        audio = video.audio
+        audio.write_audiofile(output_path)
+        audio.close()
+        video.close()
+        print(f"成功從 '{filename}' 中提取音訊並儲存為 '{os.path.basename(output_path)}'")
+        return "success"
+    except Exception as e:
+        print(f"從 '{filename}' 提取音訊時發生錯誤: {e}")
+        return "error"
+
 def main():
     """主執行函式。"""
     print("=== 檔案格式轉換器 ===")
@@ -301,8 +401,12 @@ def main():
         convert_func = convert_image
     elif conversion_type == 'video':
         supported_formats = (".mp4", ".mov", ".avi", ".webm", ".mkv")
-        target_format_func = get_target_video_format
-        convert_func = convert_video
+        if ask_extract_audio():
+            target_format_func = get_target_audio_format
+            convert_func = extract_audio_from_video
+        else:
+            target_format_func = get_target_video_format
+            convert_func = convert_video
     elif conversion_type == 'audio':
         supported_formats = (".mp3", ".wav", ".ogg", ".flac")
         target_format_func = get_target_audio_format
